@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>GPS / 加速度 对比测试</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --bg-panel: #11161d;
+    --accent-gps: #ff9f45;
+    --accent-accel: #5bc9e8;
+    --accent-mic: #a8d66c;
+    --steel: #5b7c99;
+    --steel-dim: #33465a;
+    --text-primary: #eef2f5;
+    --text-secondary: #7c8a97;
+    --danger: #e8615a;
+    --ok: #5bc98d;
+    --warn: #ffb454;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: env(safe-area-inset-top, 16px) 14px calc(env(safe-area-inset-bottom, 16px) + 10px);
+    min-height: 100vh;
+    gap: 10px;
+  }
+
+  .container { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
+
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    row-gap: 4px;
+    padding: 8px 12px;
+    background: var(--bg-panel);
+    border-radius: 10px;
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+
+  .status-bar b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+  .dual-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+
+  .panel {
+    background: var(--bg-panel);
+    border-radius: 12px;
+    padding: 12px 6px;
+    text-align: center;
+    border: 1px solid transparent;
+  }
+
+  .panel.gps { border-color: rgba(255, 159, 69, 0.25); }
+  .panel.accel { border-color: rgba(91, 201, 232, 0.25); }
+  .panel.mic { border-color: rgba(168, 214, 108, 0.25); }
+
+  .panel-label {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+  }
+
+  .panel-value {
+    font-size: clamp(24px, 8vw, 34px);
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .panel.gps .panel-value { color: var(--accent-gps); text-shadow: 0 0 14px rgba(255, 159, 69, 0.35); }
+  .panel.accel .panel-value { color: var(--accent-accel); text-shadow: 0 0 14px rgba(91, 201, 232, 0.35); }
+  .panel.mic .panel-value { color: var(--accent-mic); text-shadow: 0 0 14px rgba(168, 214, 108, 0.35); }
+
+  .panel-unit { font-size: 10px; color: var(--text-secondary); margin-top: 4px; }
+  .panel-sub { font-size: 9px; color: var(--text-secondary); margin-top: 6px; min-height: 12px; }
+
+  .chart-wrap {
+    background: var(--bg-panel);
+    border-radius: 12px;
+    padding: 10px;
+  }
+
+  canvas#chart { width: 100%; height: 120px; display: block; }
+
+  .legend { display: flex; gap: 14px; font-size: 10px; color: var(--text-secondary); margin-top: 6px; justify-content: center; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; }
+  .legend .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .legend .dot.gps { background: var(--accent-gps); }
+  .legend .dot.accel { background: var(--accent-accel); }
+  .legend .dot.mic { background: var(--accent-mic); }
+
+  .record-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-panel);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .record-bar b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+  .controls { display: flex; gap: 10px; }
+
+  button {
+    flex: 1;
+    border: none;
+    border-radius: 12px;
+    padding: 15px;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+
+  #toggleBtn { background: var(--accent-gps); color: #1a1006; }
+  #toggleBtn.recording { background: var(--danger); color: #200a08; }
+  #exportBtn { background: var(--steel-dim); color: var(--text-primary); }
+  #exportBtn:disabled { opacity: 0.4; }
+
+  .hint { font-size: 11px; color: var(--text-secondary); text-align: center; line-height: 1.6; padding: 0 4px; }
+  .hint.danger { color: var(--danger); }
+
+  .status-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; background: var(--danger);
+  }
+  .status-dot.ok { background: var(--ok); }
+  .status-dot.warn { background: var(--warn); }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="status-bar">
+    <span><span id="gpsStatusDot" class="status-dot"></span>GPS: <b id="gpsStatusText">未启动</b></span>
+    <span><span id="accelStatusDot" class="status-dot"></span>加速度: <b id="accelStatusText">未启动</b></span>
+    <span><span id="micStatusDot" class="status-dot"></span>麦克风: <b id="micStatusText">未启动</b></span>
+  </div>
+
+  <div class="dual-panel">
+    <div class="panel gps">
+      <div class="panel-label">GPS 速度</div>
+      <div class="panel-value" id="gpsValue">--</div>
+      <div class="panel-unit">km/h</div>
+      <div class="panel-sub" id="gpsSub">精度 --</div>
+    </div>
+    <div class="panel accel">
+      <div class="panel-label">加速度抖动</div>
+      <div class="panel-value" id="accelValue">--</div>
+      <div class="panel-unit">raw jerk</div>
+      <div class="panel-sub" id="accelSub">&nbsp;</div>
+    </div>
+    <div class="panel mic">
+      <div class="panel-label">环境音量</div>
+      <div class="panel-value" id="micValue">--</div>
+      <div class="panel-unit">raw rms</div>
+      <div class="panel-sub" id="micSub">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="chart-wrap">
+    <canvas id="chart" width="600" height="240"></canvas>
+    <div class="legend">
+      <span><span class="dot gps"></span>GPS</span>
+      <span><span class="dot accel"></span>加速度</span>
+      <span><span class="dot mic"></span>音量</span>
+    </div>
+  </div>
+
+  <div class="record-bar">
+    <span>已录制 <b id="sampleCount">0</b> 条</span>
+    <span>时长 <b id="elapsedTime">00:00</b></span>
+  </div>
+
+  <div class="controls">
+    <button id="toggleBtn">开始测试</button>
+    <button id="exportBtn" disabled>导出 CSV</button>
+  </div>
+
+  <div id="hintText" class="hint">
+    点击"开始测试"会依次请求定位权限和运动传感器权限，两个都需要允许。iOS 上运动传感器权限弹窗可能会晚几秒才出现，属于正常现象。
+  </div>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- 状态 ----------
+  let recording = false;
+  let startTime = null;
+  let watchId = null;
+  let wakeLock = null;
+  let tickTimer = null;
+
+  let lastFix = null; // { lat, lon, t } GPS 兜底算速度用
+  const gps = { speedKmh: null, accuracy: null };
+
+  let lastAccelMagnitude = null;
+  const accelBuffer = []; // 本次 tick 周期内收集的 jerk 值
+
+  const samples = []; // 最终记录的数据行
+  const CHART_WINDOW = 60; // 图表显示最近多少个采样点
+  const chartData = { gps: [], accel: [], mic: [] };
+  let maxGpsSeen = 1;
+  let maxAccelSeen = 1;
+  let maxMicSeen = 1;
+
+  const TICK_MS = 250; // 每 250ms 合并一次两路数据，写一行记录
+
+  // ---------- DOM ----------
+  const el = {
+    gpsStatusDot: document.getElementById("gpsStatusDot"),
+    gpsStatusText: document.getElementById("gpsStatusText"),
+    accelStatusDot: document.getElementById("accelStatusDot"),
+    accelStatusText: document.getElementById("accelStatusText"),
+    micStatusDot: document.getElementById("micStatusDot"),
+    micStatusText: document.getElementById("micStatusText"),
+    gpsValue: document.getElementById("gpsValue"),
+    gpsSub: document.getElementById("gpsSub"),
+    accelValue: document.getElementById("accelValue"),
+    accelSub: document.getElementById("accelSub"),
+    micValue: document.getElementById("micValue"),
+    micSub: document.getElementById("micSub"),
+    sampleCount: document.getElementById("sampleCount"),
+    elapsedTime: document.getElementById("elapsedTime"),
+    toggleBtn: document.getElementById("toggleBtn"),
+    exportBtn: document.getElementById("exportBtn"),
+    hintText: document.getElementById("hintText"),
+    chart: document.getElementById("chart"),
+  };
+  const ctx = el.chart.getContext("2d");
+
+  // ---------- 工具函数 ----------
+
+  function haversineMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function formatElapsed(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const m = Math.floor(totalSec / 60).toString().padStart(2, "0");
+    const s = (totalSec % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  }
+
+  function setGpsStatus(state, text) {
+    el.gpsStatusDot.className = "status-dot" + (state ? " " + state : "");
+    el.gpsStatusText.textContent = text;
+  }
+
+  function setAccelStatus(state, text) {
+    el.accelStatusDot.className = "status-dot" + (state ? " " + state : "");
+    el.accelStatusText.textContent = text;
+  }
+
+  function setMicStatus(state, text) {
+    el.micStatusDot.className = "status-dot" + (state ? " " + state : "");
+    el.micStatusText.textContent = text;
+  }
+
+  // ---------- GPS ----------
+
+  // 高精度 GPS 拿不到卫星信号时（比如地下），自动降级为网络/基站定位兜底；
+  // 降级期间每隔一段时间自动尝试重新升回高精度，恢复地面段之后能自动切回真实 GPS。
+  let accuracyMode = "high"; // "high" | "low"
+  let upgradeRetryTimer = null;
+  const UPGRADE_RETRY_INTERVAL_MS = 20000; // 降级状态下，每隔多久重新尝试一次高精度
+
+  function handlePosition(pos) {
+    const { latitude, longitude, speed, accuracy } = pos.coords;
+    let speedKmh;
+    if (typeof speed === "number" && speed !== null) {
+      speedKmh = speed * 3.6;
+    } else if (lastFix) {
+      const dist = haversineMeters(lastFix.lat, lastFix.lon, latitude, longitude);
+      const dt = (Date.now() - lastFix.t) / 1000;
+      speedKmh = dt > 0 ? (dist / dt) * 3.6 : 0;
+    } else {
+      speedKmh = 0;
+    }
+    lastFix = { lat: latitude, lon: longitude, t: Date.now() };
+
+    gps.speedKmh = Math.max(0, speedKmh);
+    gps.accuracy = accuracy;
+    gps.lat = latitude;
+    gps.lon = longitude;
+
+    const modeLabel = accuracyMode === "low" ? "（网络定位降级中）" : "";
+    setGpsStatus(accuracy > 50 ? "warn" : "ok", (accuracy > 50 ? "信号弱" : "正常") + modeLabel);
+  }
+
+  function handlePositionError(err) {
+    if (err.code === err.PERMISSION_DENIED) {
+      setGpsStatus("", "权限被拒绝");
+      gps.speedKmh = null;
+      gps.accuracy = null;
+      return;
+    }
+
+    if (err.code === err.TIMEOUT && accuracyMode === "high") {
+      // 高精度拿不到信号（大概率在地下），自动降级到网络定位兜底
+      degradeToLowAccuracy();
+      return;
+    }
+
+    setGpsStatus("", accuracyMode === "low" ? "暂无信号（网络定位也没有）" : "暂无信号");
+    gps.speedKmh = null;
+    gps.accuracy = null;
+  }
+
+  function watchWith(highAccuracy) {
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+    }
+    watchId = navigator.geolocation.watchPosition(handlePosition, handlePositionError, {
+      enableHighAccuracy: highAccuracy,
+      maximumAge: 0,
+      timeout: 8000,
+    });
+  }
+
+  function degradeToLowAccuracy() {
+    accuracyMode = "low";
+    setGpsStatus("warn", "高精度超时，已降级为网络定位…");
+    watchWith(false);
+    scheduleUpgradeRetry();
+  }
+
+  function scheduleUpgradeRetry() {
+    if (upgradeRetryTimer !== null) return;
+    upgradeRetryTimer = setInterval(() => {
+      if (accuracyMode !== "low") return;
+      // 定期尝试重新切回高精度，一旦重新拿到卫星信号（比如出站到地面了），handlePosition 里会持续用高精度
+      accuracyMode = "high";
+      watchWith(true);
+    }, UPGRADE_RETRY_INTERVAL_MS);
+  }
+
+  function startGps() {
+    if (!("geolocation" in navigator)) {
+      setGpsStatus("", "不支持");
+      return;
+    }
+    accuracyMode = "high";
+    setGpsStatus("warn", "定位中…");
+    watchWith(true);
+  }
+
+  function stopGps() {
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    if (upgradeRetryTimer !== null) {
+      clearInterval(upgradeRetryTimer);
+      upgradeRetryTimer = null;
+    }
+    accuracyMode = "high";
+  }
+
+  // ---------- 加速度 ----------
+
+  function onDeviceMotion(event) {
+    const acc = event.accelerationIncludingGravity || event.acceleration;
+    if (!acc || acc.x === null) return;
+    const magnitude = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+
+    if (lastAccelMagnitude !== null) {
+      const jerk = Math.abs(magnitude - lastAccelMagnitude);
+      accelBuffer.push(jerk);
+    }
+    lastAccelMagnitude = magnitude;
+    setAccelStatus("ok", "正常");
+  }
+
+  async function startAccel() {
+    // iOS 13+ 需要显式请求权限，且必须在用户手势（点击事件）内调用
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      try {
+        const result = await DeviceMotionEvent.requestPermission();
+        if (result !== "granted") {
+          setAccelStatus("", "权限被拒绝");
+          return;
+        }
+      } catch (e) {
+        setAccelStatus("", "权限请求失败");
+        return;
+      }
+    }
+    setAccelStatus("warn", "等待数据…");
+    window.addEventListener("devicemotion", onDeviceMotion);
+  }
+
+  function stopAccel() {
+    window.removeEventListener("devicemotion", onDeviceMotion);
+    lastAccelMagnitude = null;
+  }
+
+  // ---------- 麦克风环境音量（实时算 RMS，不录制/不保存音频，只留一个数值） ----------
+
+  let micAudioContext = null;
+  let micAnalyser = null;
+  let micStream = null;
+  let micDataArray = null;
+  let currentMicVolume = 0;
+
+  async function startMic() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setMicStatus("", "不支持");
+      return false;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      setMicStatus("", "权限被拒绝");
+      return false;
+    }
+
+    micAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const source = micAudioContext.createMediaStreamSource(micStream);
+    micAnalyser = micAudioContext.createAnalyser();
+    micAnalyser.fftSize = 1024;
+    micDataArray = new Uint8Array(micAnalyser.frequencyBinCount);
+    source.connect(micAnalyser);
+    // 注意：不连接到 destination，避免声音被播放出来（不需要用户听到，也避免反馈啸叫）
+
+    setMicStatus("ok", "正常");
+    return true;
+  }
+
+  function stopMic() {
+    if (micStream) {
+      micStream.getTracks().forEach((track) => track.stop());
+      micStream = null;
+    }
+    if (micAudioContext) {
+      micAudioContext.close();
+      micAudioContext = null;
+    }
+    micAnalyser = null;
+    currentMicVolume = 0;
+  }
+
+  /** 读取当前时刻的音量（RMS），每次 tick 调用一次，不是每帧都算，省电 */
+  function readMicVolume() {
+    if (!micAnalyser || !micDataArray) return 0;
+    micAnalyser.getByteTimeDomainData(micDataArray);
+    let sumSquares = 0;
+    for (let i = 0; i < micDataArray.length; i++) {
+      const normalized = (micDataArray[i] - 128) / 128; // -1 ~ 1
+      sumSquares += normalized * normalized;
+    }
+    const rms = Math.sqrt(sumSquares / micDataArray.length);
+    currentMicVolume = rms;
+    return rms;
+  }
+
+  // ---------- 合并采样 + 记录 ----------
+
+  function tick() {
+    const avgJerk =
+      accelBuffer.length > 0 ? accelBuffer.reduce((a, b) => a + b, 0) / accelBuffer.length : 0;
+    accelBuffer.length = 0;
+
+    const micVolume = readMicVolume();
+
+    const now = Date.now();
+    const row = {
+      t: now,
+      elapsedMs: now - startTime,
+      gpsSpeedKmh: gps.speedKmh,
+      gpsAccuracy: gps.accuracy,
+      gpsLat: gps.lat ?? "",
+      gpsLon: gps.lon ?? "",
+      accelJerk: avgJerk,
+      micVolume: micVolume,
+    };
+    samples.push(row);
+
+    // 更新显示
+    el.gpsValue.textContent = gps.speedKmh !== null ? gps.speedKmh.toFixed(1) : "--";
+    el.gpsSub.textContent = gps.accuracy !== null ? `精度 ±${Math.round(gps.accuracy)}m` : "精度 --";
+    el.accelValue.textContent = avgJerk.toFixed(3);
+    el.micValue.textContent = micVolume.toFixed(3);
+
+    el.sampleCount.textContent = samples.length;
+    el.elapsedTime.textContent = formatElapsed(now - startTime);
+
+    // 更新图表数据（归一化到各自目前为止的最大值，方便肉眼对比走势）
+    if (gps.speedKmh !== null) maxGpsSeen = Math.max(maxGpsSeen, gps.speedKmh);
+    maxAccelSeen = Math.max(maxAccelSeen, avgJerk);
+    maxMicSeen = Math.max(maxMicSeen, micVolume);
+
+    chartData.gps.push(gps.speedKmh !== null ? gps.speedKmh / maxGpsSeen : null);
+    chartData.accel.push(avgJerk / maxAccelSeen);
+    chartData.mic.push(micVolume / maxMicSeen);
+    if (chartData.gps.length > CHART_WINDOW) chartData.gps.shift();
+    if (chartData.accel.length > CHART_WINDOW) chartData.accel.shift();
+    if (chartData.mic.length > CHART_WINDOW) chartData.mic.shift();
+
+    drawChart();
+  }
+
+  function drawChart() {
+    const w = el.chart.width;
+    const h = el.chart.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const drawLine = (data, color) => {
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      const step = w / Math.max(CHART_WINDOW - 1, 1);
+      data.forEach((v, i) => {
+        if (v === null) return;
+        const x = i * step;
+        const y = h - v * (h - 10) - 5;
+        if (i === 0 || data[i - 1] === null) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+    };
+
+    drawLine(chartData.gps, "#ff9f45");
+    drawLine(chartData.accel, "#5bc9e8");
+    drawLine(chartData.mic, "#a8d66c");
+  }
+
+  // ---------- 导出 ----------
+
+  function exportCsv() {
+    const header = ["elapsed_ms", "gps_speed_kmh", "gps_accuracy_m", "gps_lat", "gps_lon", "accel_jerk", "mic_volume"];
+    const lines = [header.join(",")];
+    for (const row of samples) {
+      lines.push(
+        [
+          row.elapsedMs,
+          row.gpsSpeedKmh !== null ? row.gpsSpeedKmh.toFixed(2) : "",
+          row.gpsAccuracy !== null ? row.gpsAccuracy.toFixed(1) : "",
+          row.gpsLat,
+          row.gpsLon,
+          row.accelJerk.toFixed(4),
+          row.micVolume.toFixed(4),
+        ].join(",")
+      );
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `speed-test-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ---------- 屏幕常亮 ----------
+
+  async function requestWakeLock() {
+    try {
+      if ("wakeLock" in navigator) {
+        wakeLock = await navigator.wakeLock.request("screen");
+      }
+    } catch (e) {
+      // 静默失败，不影响主流程
+    }
+  }
+
+  // ---------- 开始/停止 ----------
+
+  async function startRecording() {
+    recording = true;
+    startTime = Date.now();
+    samples.length = 0;
+    chartData.gps.length = 0;
+    chartData.accel.length = 0;
+    chartData.mic.length = 0;
+    maxGpsSeen = 1;
+    maxAccelSeen = 1;
+    maxMicSeen = 1;
+
+    el.toggleBtn.textContent = "停止测试";
+    el.toggleBtn.classList.add("recording");
+    el.exportBtn.disabled = true;
+    el.hintText.textContent = "测试进行中，把手机放在你平时会放的位置（手持/口袋/包里）就行，不用一直盯着看。";
+
+    requestWakeLock();
+    startGps();
+    await startAccel();
+    await startMic();
+
+    tickTimer = setInterval(tick, TICK_MS);
+  }
+
+  function stopRecording() {
+    recording = false;
+    clearInterval(tickTimer);
+    tickTimer = null;
+    stopGps();
+    stopAccel();
+    stopMic();
+
+    el.toggleBtn.textContent = "开始测试";
+    el.toggleBtn.classList.remove("recording");
+    el.exportBtn.disabled = samples.length === 0;
+    el.hintText.textContent = `本次共记录 ${samples.length} 条数据，点击"导出 CSV"保存。`;
+  }
+
+  el.toggleBtn.addEventListener("click", () => {
+    if (recording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  });
+
+  el.exportBtn.addEventListener("click", exportCsv);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && recording) {
+      requestWakeLock();
+    }
+  });
+})();
+</script>
+</body>
+</html>
