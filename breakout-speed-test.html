@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+<title>打砖块 · 速度测试</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --bg-panel: #11161d;
+    --accent: #ff9f45;
+    --accel: #5bc9e8;
+    --text-primary: #eef2f5;
+    --text-secondary: #7c8a97;
+    --danger: #e8615a;
+    --ok: #5bc98d;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; touch-action: none; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    overflow: hidden;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: env(safe-area-inset-top, 10px) 10px calc(env(safe-area-inset-bottom, 10px) + 8px);
+    gap: 8px;
+    min-height: 100vh;
+  }
+
+  .top-bar {
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-panel);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .top-bar b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+  .game-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 420px;
+    flex: 1;
+    min-height: 0;
+    background: var(--bg-panel);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+
+  canvas#game { width: 100%; height: 100%; display: block; touch-action: none; }
+
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 14, 20, 0.85);
+    gap: 14px;
+    text-align: center;
+    padding: 20px;
+  }
+
+  .overlay.hidden { display: none; }
+
+  .overlay h2 { margin: 0; font-size: 20px; }
+  .overlay p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+
+  .overlay button {
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #1a1006;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 14px;
+    padding: 12px 28px;
+    cursor: pointer;
+  }
+
+  .control-panel {
+    width: 100%;
+    max-width: 420px;
+    background: var(--bg-panel);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .mode-row { display: flex; gap: 8px; }
+
+  .mode-row button {
+    flex: 1;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 0;
+    font-family: inherit;
+    font-size: 11px;
+    background: #1a212b;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .mode-row button.active { background: var(--accel); color: #05202a; font-weight: 700; }
+
+  .intensity-row { display: flex; align-items: center; gap: 10px; }
+  .intensity-bar-track {
+    flex: 1;
+    height: 8px;
+    background: #1a212b;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .intensity-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accel), var(--accent));
+    width: 0%;
+    transition: width 0.15s ease-out;
+  }
+  .intensity-label { font-size: 11px; color: var(--text-secondary); min-width: 62px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .keyboard-hint { font-size: 10px; color: var(--text-secondary); text-align: center; }
+</style>
+</head>
+<body>
+
+  <div class="top-bar">
+    <span>分数 <b id="scoreText">0</b></span>
+    <span>生命 <b id="livesText">3</b></span>
+    <span>球速倍率 <b id="speedMultText">1.0x</b></span>
+  </div>
+
+  <div class="game-wrap">
+    <canvas id="game"></canvas>
+    <div id="startOverlay" class="overlay">
+      <h2>打砖块 · 速度测试版</h2>
+      <p>拖动屏幕控制挡板左右移动<br/>球速由下方"强度"驱动，强度越高球越快</p>
+      <button id="startBtn">开始</button>
+    </div>
+    <div id="endOverlay" class="overlay hidden">
+      <h2 id="endTitle">游戏结束</h2>
+      <p id="endDetail"></p>
+      <button id="restartBtn">再来一次</button>
+    </div>
+  </div>
+
+  <div class="control-panel">
+    <div class="mode-row">
+      <button id="modeKeyboard" class="active">键盘模拟</button>
+      <button id="modeSensor">加速度计</button>
+      <button id="modeGps">GPS</button>
+    </div>
+    <div class="intensity-row">
+      <div class="intensity-bar-track"><div id="intensityFill" class="intensity-bar-fill"></div></div>
+      <div class="intensity-label" id="intensityLabel">强度 0</div>
+    </div>
+    <div class="keyboard-hint" id="modeHint">键盘模拟模式：↑ 增强 / ↓ 减弱 / 空格 归零</div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  // 难度输入层：统一喂 0-100 的强度值，不管来源是键盘还是真实传感器
+  // 这部分设计跟 Cocos 那边的 MotionTracker 是同一套思路，方便以后对齐
+  // ============================================================
+
+  const DifficultyInput = (() => {
+    let mode = "keyboard"; // "keyboard" | "sensor" | "gps"
+    let intensity = 0;
+    const listeners = [];
+    const statusListeners = [];
+
+    function reportStatus(text) {
+      for (const cb of statusListeners) cb(text);
+    }
+
+    // ---- 键盘模拟 ----
+    let kbTarget = 0;
+    const KB_STEP = 8;
+    const KB_DECAY_PER_SEC = 6;
+
+    function onKeyDown(e) {
+      if (mode !== "keyboard") return;
+      if (e.key === "ArrowUp") kbTarget = Math.min(100, kbTarget + KB_STEP);
+      else if (e.key === "ArrowDown") kbTarget = Math.max(0, kbTarget - KB_STEP);
+      else if (e.key === " ") kbTarget = 0;
+    }
+    window.addEventListener("keydown", onKeyDown);
+
+    function tickKeyboard(dtSec) {
+      if (kbTarget > 0) {
+        kbTarget = Math.max(0, kbTarget - KB_DECAY_PER_SEC * dtSec);
+      }
+      setIntensity(kbTarget);
+    }
+
+    // ---- 真实加速度计（跟 gps-accel-tester.html 里的算法一致：抖动量 + 简单基准校准） ----
+    let lastMagnitude = null;
+    let baselineJerk = 0;
+    let calibrating = false;
+    let calibrationSamples = [];
+    let calibrationStart = 0;
+    const CALIBRATION_MS = 1500;
+    const INTENSITY_SCALE = 350; // 跟 MotionTracker 里的系数同一个含义，需要实测微调
+    const jerkWindow = [];
+    const JERK_WINDOW_SIZE = 6;
+
+    function onDeviceMotion(event) {
+      if (mode !== "sensor") return;
+      const acc = event.accelerationIncludingGravity || event.acceleration;
+      if (!acc || acc.x === null) return;
+      const magnitude = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+      if (lastMagnitude === null) {
+        lastMagnitude = magnitude;
+        return;
+      }
+      const jerk = Math.abs(magnitude - lastMagnitude);
+      lastMagnitude = magnitude;
+
+      if (calibrating) {
+        calibrationSamples.push(jerk);
+        if (Date.now() - calibrationStart >= CALIBRATION_MS) {
+          calibrating = false;
+          baselineJerk = calibrationSamples.length
+            ? calibrationSamples.reduce((a, b) => a + b, 0) / calibrationSamples.length
+            : 0;
+          reportStatus("加速度计：追踪中");
+        }
+        return;
+      }
+
+      jerkWindow.push(jerk);
+      if (jerkWindow.length > JERK_WINDOW_SIZE) jerkWindow.shift();
+      const avgJerk = jerkWindow.reduce((a, b) => a + b, 0) / jerkWindow.length;
+      const adjusted = Math.max(0, avgJerk - baselineJerk);
+      setIntensity(Math.max(0, Math.min(100, adjusted * INTENSITY_SCALE)));
+    }
+
+    async function enableSensor() {
+      if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+        try {
+          const result = await DeviceMotionEvent.requestPermission();
+          if (result !== "granted") return false;
+        } catch (e) {
+          return false;
+        }
+      }
+      calibrating = true;
+      calibrationSamples = [];
+      calibrationStart = Date.now();
+      reportStatus("加速度计：校准中，保持当前状态几秒…");
+      window.addEventListener("devicemotion", onDeviceMotion);
+      return true;
+    }
+
+    function disableSensor() {
+      window.removeEventListener("devicemotion", onDeviceMotion);
+      lastMagnitude = null;
+    }
+
+    // ---- 真实 GPS（跟 gps-accel-tester.html 同一套算法：speed 字段优先，没有就用两点位移反推） ----
+    let gpsWatchId = null;
+    let lastFix = null;
+    const GPS_MAX_SPEED_KMH = 60; // 强度=100 对应的车速上限，按实测车况调整
+
+    function haversineMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toRad = (d) => (d * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    function handleGpsPosition(pos) {
+      const { latitude, longitude, speed, accuracy } = pos.coords;
+      let speedKmh;
+      if (typeof speed === "number" && speed !== null) {
+        speedKmh = speed * 3.6;
+      } else if (lastFix) {
+        const dist = haversineMeters(lastFix.lat, lastFix.lon, latitude, longitude);
+        const dt = (Date.now() - lastFix.t) / 1000;
+        speedKmh = dt > 0 ? (dist / dt) * 3.6 : 0;
+      } else {
+        speedKmh = 0;
+      }
+      lastFix = { lat: latitude, lon: longitude, t: Date.now() };
+
+      const clampedSpeed = Math.max(0, speedKmh);
+      setIntensity(Math.max(0, Math.min(100, (clampedSpeed / GPS_MAX_SPEED_KMH) * 100)));
+      reportStatus(
+        `GPS：${clampedSpeed.toFixed(1)} km/h（精度 ±${Math.round(accuracy)}m）${accuracy > 50 ? " 信号弱" : ""}`
+      );
+    }
+
+    function handleGpsError(err) {
+      if (err.code === err.PERMISSION_DENIED) {
+        reportStatus("GPS：权限被拒绝");
+      } else {
+        reportStatus("GPS：暂无信号（隧道里正常现象）");
+      }
+    }
+
+    function enableGps() {
+      if (!("geolocation" in navigator)) {
+        reportStatus("GPS：此设备不支持");
+        return false;
+      }
+      lastFix = null;
+      reportStatus("GPS：定位中…");
+      gpsWatchId = navigator.geolocation.watchPosition(handleGpsPosition, handleGpsError, {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 8000,
+      });
+      return true;
+    }
+
+    function disableGps() {
+      if (gpsWatchId !== null) {
+        navigator.geolocation.clearWatch(gpsWatchId);
+        gpsWatchId = null;
+      }
+    }
+
+    // ---- 公共接口 ----
+    function setIntensity(v) {
+      intensity = v;
+      for (const cb of listeners) cb(intensity);
+    }
+
+    return {
+      async setMode(newMode) {
+        if (newMode === mode) return true;
+        if (newMode === "sensor") {
+          const ok = await enableSensor();
+          if (!ok) return false;
+        } else if (newMode === "gps") {
+          const ok = enableGps();
+          if (!ok) return false;
+        }
+        // 离开旧模式时清理
+        if (mode === "sensor") disableSensor();
+        if (mode === "gps") disableGps();
+
+        mode = newMode;
+        return true;
+      },
+      getMode: () => mode,
+      getIntensity: () => intensity,
+      onUpdate: (cb) => listeners.push(cb),
+      onStatus: (cb) => statusListeners.push(cb),
+      tick: (dtSec) => {
+        if (mode === "keyboard") tickKeyboard(dtSec);
+      },
+    };
+  })();
+
+  // ============================================================
+  // 打砖块核心游戏逻辑
+  // ============================================================
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  let W = 0, H = 0;
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    W = canvas.width = rect.width * devicePixelRatio;
+    H = canvas.height = rect.height * devicePixelRatio;
+  }
+  window.addEventListener("resize", resize);
+
+  const BASE_BALL_SPEED = 260; // px/s，对应强度=0时的球速
+  const MAX_SPEED_MULT = 2.6;  // 强度=100 时球速是基础速度的多少倍
+  const BASE_PADDLE_WIDTH = 80; // 强度=0 时挡板宽度（css px，实际渲染会乘 devicePixelRatio）
+  const MIN_PADDLE_WIDTH_RATIO = 0.55; // 强度=100 时挡板缩到基础宽度的百分比
+  const MAX_SHAKE_PX = 6; // 强度=100 时画面震动的最大幅度（css px），纯视觉，不影响碰撞判定
+
+  const state = {
+    running: false,
+    score: 0,
+    lives: 3,
+    paddle: { x: 0, y: 0, w: 80, h: 12 },
+    ball: { x: 0, y: 0, r: 7, vx: 0, vy: 0 },
+    bricks: [],
+    speedMult: 1,
+  };
+
+  function speedMultFromIntensity(intensity) {
+    return 1 + (intensity / 100) * (MAX_SPEED_MULT - 1);
+  }
+
+  function paddleWidthFromIntensity(intensity) {
+    const ratio = 1 - (intensity / 100) * (1 - MIN_PADDLE_WIDTH_RATIO);
+    return BASE_PADDLE_WIDTH * ratio * devicePixelRatio;
+  }
+
+  function initBricks() {
+    const rows = 5, cols = 7;
+    const padding = 6;
+    const brickW = (W - padding * (cols + 1)) / cols;
+    const brickH = 18 * devicePixelRatio;
+    state.bricks = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        state.bricks.push({
+          x: padding + c * (brickW + padding),
+          y: 40 * devicePixelRatio + r * (brickH + padding),
+          w: brickW,
+          h: brickH,
+          alive: true,
+          color: `hsl(${200 + r * 25}, 70%, 60%)`,
+        });
+      }
+    }
+  }
+
+  function resetBallAndPaddle() {
+    state.paddle.w = paddleWidthFromIntensity(DifficultyInput.getIntensity());
+    state.paddle.h = 12 * devicePixelRatio;
+    state.paddle.x = W / 2 - state.paddle.w / 2;
+    state.paddle.y = H - 40 * devicePixelRatio;
+
+    state.ball.x = W / 2;
+    state.ball.y = state.paddle.y - 20 * devicePixelRatio;
+    const angle = (Math.PI / 4) + Math.random() * (Math.PI / 2); // 45°~135°之间随机出球方向
+    state.ball.vx = Math.cos(angle) * BASE_BALL_SPEED * devicePixelRatio;
+    state.ball.vy = -Math.sin(angle) * BASE_BALL_SPEED * devicePixelRatio;
+  }
+
+  function startGame() {
+    resize();
+    initBricks();
+    resetBallAndPaddle();
+    state.score = 0;
+    state.lives = 3;
+    state.running = true;
+    document.getElementById("startOverlay").classList.add("hidden");
+    document.getElementById("endOverlay").classList.add("hidden");
+    updateHud();
+  }
+
+  function updateHud() {
+    document.getElementById("scoreText").textContent = state.score;
+    document.getElementById("livesText").textContent = state.lives;
+    document.getElementById("speedMultText").textContent = state.speedMult.toFixed(2) + "x";
+  }
+
+  function endGame(win) {
+    state.running = false;
+    document.getElementById("endTitle").textContent = win ? "全部消除！" : "游戏结束";
+    document.getElementById("endDetail").textContent = `本局得分 ${state.score}`;
+    document.getElementById("endOverlay").classList.remove("hidden");
+  }
+
+  // ---- 拖动挡板 ----
+  function pointerToLocalX(clientX) {
+    const rect = canvas.getBoundingClientRect();
+    return (clientX - rect.left) * (W / rect.width);
+  }
+
+  canvas.addEventListener("touchmove", (e) => {
+    if (!state.running) return;
+    const x = pointerToLocalX(e.touches[0].clientX);
+    state.paddle.x = Math.max(0, Math.min(W - state.paddle.w, x - state.paddle.w / 2));
+    e.preventDefault();
+  }, { passive: false });
+
+  let mouseDown = false;
+  canvas.addEventListener("mousedown", () => { mouseDown = true; });
+  window.addEventListener("mouseup", () => { mouseDown = false; });
+  canvas.addEventListener("mousemove", (e) => {
+    if (!state.running || !mouseDown) return;
+    const x = pointerToLocalX(e.clientX);
+    state.paddle.x = Math.max(0, Math.min(W - state.paddle.w, x - state.paddle.w / 2));
+  });
+
+  // ---- 碰撞与更新 ----
+  function update(dtSec) {
+    if (!state.running) return;
+
+    const intensity = DifficultyInput.getIntensity();
+    state.speedMult = speedMultFromIntensity(intensity);
+    const mult = state.speedMult;
+
+    // 挡板宽度实时跟随强度变化，缩放时保持中心点不动，避免视觉跳变
+    const newPaddleW = paddleWidthFromIntensity(intensity);
+    const paddleCenter = state.paddle.x + state.paddle.w / 2;
+    state.paddle.w = newPaddleW;
+    state.paddle.x = Math.max(0, Math.min(W - newPaddleW, paddleCenter - newPaddleW / 2));
+
+    const b = state.ball;
+    b.x += b.vx * mult * dtSec;
+    b.y += b.vy * mult * dtSec;
+
+    // 墙壁反弹
+    if (b.x - b.r < 0) { b.x = b.r; b.vx *= -1; }
+    if (b.x + b.r > W) { b.x = W - b.r; b.vx *= -1; }
+    if (b.y - b.r < 0) { b.y = b.r; b.vy *= -1; }
+
+    // 掉出底部
+    if (b.y - b.r > H) {
+      state.lives -= 1;
+      updateHud();
+      if (state.lives <= 0) {
+        endGame(false);
+        return;
+      }
+      resetBallAndPaddle();
+      return;
+    }
+
+    // 挡板碰撞
+    const p = state.paddle;
+    if (
+      b.y + b.r > p.y &&
+      b.y - b.r < p.y + p.h &&
+      b.x > p.x &&
+      b.x < p.x + p.w &&
+      b.vy > 0
+    ) {
+      // 按撞击挡板的位置调整反弹角度，越靠边缘角度越斜
+      const hitPos = (b.x - (p.x + p.w / 2)) / (p.w / 2); // -1 ~ 1
+      const speed = Math.hypot(b.vx, b.vy);
+      const angle = hitPos * (Math.PI / 3); // 最大 60°
+      b.vx = Math.sin(angle) * speed;
+      b.vy = -Math.cos(angle) * speed;
+      b.y = p.y - b.r;
+    }
+
+    // 砖块碰撞
+    for (const brick of state.bricks) {
+      if (!brick.alive) continue;
+      if (
+        b.x + b.r > brick.x &&
+        b.x - b.r < brick.x + brick.w &&
+        b.y + b.r > brick.y &&
+        b.y - b.r < brick.y + brick.h
+      ) {
+        brick.alive = false;
+        state.score += 10;
+        b.vy *= -1;
+        updateHud();
+        break;
+      }
+    }
+
+    if (state.bricks.every((br) => !br.alive)) {
+      endGame(true);
+    }
+  }
+
+  let shakePhase = 0; // 震动的时间累积相位
+
+  function draw(dtSec) {
+    ctx.clearRect(0, 0, W, H);
+
+    // 画面震动：纯视觉效果，只在渲染时平移画布，不改变球/挡板的真实坐标，
+    // 所以不会影响碰撞判定——只是让玩家"感觉"更颠簸，用来验证主观难度和真实难度是不是两回事
+    const intensity = DifficultyInput.getIntensity();
+    const shakeMagnitude = (intensity / 100) * MAX_SHAKE_PX * devicePixelRatio;
+    shakePhase += dtSec * 6.5;
+    const shakeX = Math.sin(shakePhase * 1.7) * shakeMagnitude + (Math.random() - 0.5) * shakeMagnitude * 0.4;
+    const shakeY = Math.sin(shakePhase * 2.3 + 1.3) * shakeMagnitude + (Math.random() - 0.5) * shakeMagnitude * 0.4;
+
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
+
+    // 砖块
+    for (const brick of state.bricks) {
+      if (!brick.alive) continue;
+      ctx.fillStyle = brick.color;
+      ctx.fillRect(brick.x, brick.y, brick.w, brick.h);
+    }
+
+    // 挡板
+    ctx.fillStyle = "#ff9f45";
+    ctx.fillRect(state.paddle.x, state.paddle.y, state.paddle.w, state.paddle.h);
+
+    // 球
+    ctx.beginPath();
+    ctx.arc(state.ball.x, state.ball.y, state.ball.r, 0, Math.PI * 2);
+    ctx.fillStyle = "#eef2f5";
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // ---- 主循环 ----
+  let lastTime = performance.now();
+  function loop(now) {
+    const dtSec = Math.min(0.05, (now - lastTime) / 1000); // 限制最大步长，避免切后台回来瞬间跳变
+    lastTime = now;
+
+    DifficultyInput.tick(dtSec);
+    update(dtSec);
+    draw(dtSec);
+
+    requestAnimationFrame(loop);
+  }
+
+  // ---- 强度显示条 ----
+  DifficultyInput.onUpdate((intensity) => {
+    document.getElementById("intensityFill").style.width = `${intensity}%`;
+    document.getElementById("intensityLabel").textContent = `强度 ${intensity.toFixed(0)}`;
+  });
+
+  // ---- 模式切换 UI ----
+  const modeKeyboardBtn = document.getElementById("modeKeyboard");
+  const modeSensorBtn = document.getElementById("modeSensor");
+  const modeGpsBtn = document.getElementById("modeGps");
+  const modeHint = document.getElementById("modeHint");
+  const allModeBtns = [modeKeyboardBtn, modeSensorBtn, modeGpsBtn];
+
+  function setActiveBtn(btn) {
+    for (const b of allModeBtns) b.classList.remove("active");
+    btn.classList.add("active");
+  }
+
+  modeKeyboardBtn.addEventListener("click", async () => {
+    await DifficultyInput.setMode("keyboard");
+    setActiveBtn(modeKeyboardBtn);
+    modeHint.textContent = "键盘模拟模式：↑ 增强 / ↓ 减弱 / 空格 归零";
+  });
+
+  modeSensorBtn.addEventListener("click", async () => {
+    const ok = await DifficultyInput.setMode("sensor");
+    if (!ok) {
+      modeHint.textContent = "传感器权限被拒绝或不支持，已保留当前模式";
+      return;
+    }
+    setActiveBtn(modeSensorBtn);
+  });
+
+  modeGpsBtn.addEventListener("click", async () => {
+    const ok = await DifficultyInput.setMode("gps");
+    if (!ok) {
+      modeHint.textContent = "GPS 不可用，已保留当前模式";
+      return;
+    }
+    setActiveBtn(modeGpsBtn);
+  });
+
+  DifficultyInput.onStatus((text) => {
+    modeHint.textContent = text;
+  });
+
+  // ---- 开始 / 重开 ----
+  document.getElementById("startBtn").addEventListener("click", startGame);
+  document.getElementById("restartBtn").addEventListener("click", startGame);
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
