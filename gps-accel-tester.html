@@ -435,7 +435,16 @@
   let micAnalyser = null;
   let micStream = null;
   let micDataArray = null;
+  let micFreqDataArray = null;
+  let micSampleRate = 44100;
   let currentMicVolume = 0;
+
+  // 频段划分（Hz）：低频对应轮轨滚动的沉闷声，中频多是人声/报站广播，高频多是电机啸叫、刹车尖啸这类
+  const FREQ_BANDS = [
+    { name: "low", from: 20, to: 250 },
+    { name: "mid", from: 250, to: 2000 },
+    { name: "high", from: 2000, to: 8000 },
+  ];
 
   async function startMic() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -450,10 +459,12 @@
     }
 
     micAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    micSampleRate = micAudioContext.sampleRate;
     const source = micAudioContext.createMediaStreamSource(micStream);
     micAnalyser = micAudioContext.createAnalyser();
     micAnalyser.fftSize = 1024;
     micDataArray = new Uint8Array(micAnalyser.frequencyBinCount);
+    micFreqDataArray = new Uint8Array(micAnalyser.frequencyBinCount);
     source.connect(micAnalyser);
     // 注意：不连接到 destination，避免声音被播放出来（不需要用户听到，也避免反馈啸叫）
 
@@ -488,6 +499,27 @@
     return rms;
   }
 
+  /** 读取三个频段各自的平均能量（0-255 原始刻度），用来看声音的"音色"而不只是响度 */
+  function readMicBands() {
+    if (!micAnalyser || !micFreqDataArray) return { low: 0, mid: 0, high: 0 };
+    micAnalyser.getByteFrequencyData(micFreqDataArray);
+
+    const binHz = micSampleRate / micAnalyser.fftSize; // 每个频率 bin 代表多少 Hz
+    const result = {};
+    for (const band of FREQ_BANDS) {
+      const startBin = Math.floor(band.from / binHz);
+      const endBin = Math.min(micFreqDataArray.length - 1, Math.ceil(band.to / binHz));
+      let sum = 0;
+      let count = 0;
+      for (let i = startBin; i <= endBin; i++) {
+        sum += micFreqDataArray[i];
+        count++;
+      }
+      result[band.name] = count > 0 ? sum / count : 0;
+    }
+    return result;
+  }
+
   // ---------- 合并采样 + 记录 ----------
 
   function tick() {
@@ -496,6 +528,7 @@
     accelBuffer.length = 0;
 
     const micVolume = readMicVolume();
+    const micBands = readMicBands();
 
     const now = Date.now();
     const row = {
@@ -507,6 +540,9 @@
       gpsLon: gps.lon ?? "",
       accelJerk: avgJerk,
       micVolume: micVolume,
+      micBandLow: micBands.low,
+      micBandMid: micBands.mid,
+      micBandHigh: micBands.high,
     };
     samples.push(row);
 
@@ -515,6 +551,7 @@
     el.gpsSub.textContent = gps.accuracy !== null ? `精度 ±${Math.round(gps.accuracy)}m` : "精度 --";
     el.accelValue.textContent = avgJerk.toFixed(3);
     el.micValue.textContent = micVolume.toFixed(3);
+    el.micSub.textContent = `低${micBands.low.toFixed(0)} 中${micBands.mid.toFixed(0)} 高${micBands.high.toFixed(0)}`;
 
     el.sampleCount.textContent = samples.length;
     el.elapsedTime.textContent = formatElapsed(now - startTime);
@@ -565,7 +602,18 @@
   // ---------- 导出 ----------
 
   function exportCsv() {
-    const header = ["elapsed_ms", "gps_speed_kmh", "gps_accuracy_m", "gps_lat", "gps_lon", "accel_jerk", "mic_volume"];
+    const header = [
+      "elapsed_ms",
+      "gps_speed_kmh",
+      "gps_accuracy_m",
+      "gps_lat",
+      "gps_lon",
+      "accel_jerk",
+      "mic_volume",
+      "mic_band_low",
+      "mic_band_mid",
+      "mic_band_high",
+    ];
     const lines = [header.join(",")];
     for (const row of samples) {
       lines.push(
@@ -577,6 +625,9 @@
           row.gpsLon,
           row.accelJerk.toFixed(4),
           row.micVolume.toFixed(4),
+          row.micBandLow.toFixed(2),
+          row.micBandMid.toFixed(2),
+          row.micBandHigh.toFixed(2),
         ].join(",")
       );
     }
