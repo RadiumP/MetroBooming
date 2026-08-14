@@ -78,13 +78,22 @@ button:disabled { opacity: .4; }
 <body>
 <main class="app">
 
-  <div id="httpsWarn" class="warn-banner hidden">GPS / 运动传感器 / 麦克风需要安全上下文（HTTPS 或 localhost）。请通过 HTTPS 访问本页面，否则传感器无法启动。</div>
+  <div id="httpsWarn" class="warn-banner hidden">运动、环境与麦克风传感器需要安全上下文（HTTPS 或 localhost）。不支持的传感器会自动降级，不影响其他数据。</div>
   <div id="draftBanner" class="warn-banner hidden">发现上次未导出的数据 <b id="draftCount"></b> 条。<button id="restoreDraftBtn">恢复</button><button id="discardDraftBtn">丢弃</button></div>
 
   <section class="box status">
     <span><i id="gd" class="dot"></i>GPS <b id="gs">未启动</b></span>
     <span><i id="ad" class="dot"></i>加速度 <b id="as">未启动</b></span>
     <span><i id="md" class="dot"></i>麦克风 <b id="ms">未启动</b></span>
+    <span><i id="yd" class="dot"></i>陀螺仪 <b id="ys">未启动</b></span>
+    <span><i id="pd" class="dot"></i>气压计 <b id="ps">未启动</b></span>
+    <span><i id="xd" class="dot"></i>磁力计 <b id="xs">未启动</b></span>
+  </section>
+
+  <section class="metrics">
+    <div class="box card acc"><div class="name">陀螺仪旋转</div><div id="yv" class="value">--</div><div class="unit">RMS deg/s</div><div id="ysub" class="detail">用于排除持机动作</div></div>
+    <div class="box card gps"><div class="name">环境气压</div><div id="pv" class="value">--</div><div class="unit">hPa</div><div id="psub" class="detail">实验记录，不参与预测</div></div>
+    <div class="box card mic"><div class="name">磁场强度</div><div id="xv" class="value">--</div><div class="unit">μT</div><div id="xsub" class="detail">实验记录，不参与预测</div></div>
   </section>
 
   <section class="metrics">
@@ -186,7 +195,9 @@ button:disabled { opacity: .4; }
       SHOCK_SUSTAIN_MULT: 2.7,
       SHOCK_COOLDOWN_MS: 10000,   // 事件冷却
       SHOCK_UI_RESET_MS: 1500,    // 事件显示保留时长
+      GYRO_USER_ROTATION_RMS: 45, // 高于此值视为明显持机旋转，不触发列车震动事件
     },
+    ENV: { FREQUENCY_HZ: 10 },
     MIC: {
       FFT_SIZE: 2048,
       SMOOTHING: 0.25,
@@ -259,8 +270,8 @@ button:disabled { opacity: .4; }
   /* ---------------- UI：DOM 缓存 + 状态刷新 ---------------- */
   const UI = (() => {
     const IDS = [
-      "gd", "gs", "ad", "as", "md", "ms",
-      "gv", "gsub", "av", "asub", "mv", "msub",
+      "gd", "gs", "ad", "as", "md", "ms", "yd", "ys", "pd", "ps", "xd", "xs",
+      "gv", "gsub", "av", "asub", "mv", "msub", "yv", "ysub", "pv", "psub", "xv", "xsub",
       "trainState", "conf", "intensityText",
       "shock", "shockSub",
       "count", "elapsed", "shocks",
@@ -315,12 +326,21 @@ button:disabled { opacity: .4; }
       status("g", "", "未启动");
       status("a", "", "未启动");
       status("m", "", "未启动");
+      status("y", "", "未启动");
+      status("p", "", "未启动");
+      status("x", "", "未启动");
       el.gv.textContent = "--";
       el.gsub.textContent = "精度 --";
       el.av.textContent = "--";
       el.asub.textContent = "峰值 -- · jerk --";
       el.mv.textContent = "--";
       el.msub.textContent = "RMS -- · 高频比 --";
+      el.yv.textContent = "--";
+      el.ysub.textContent = "用于排除持机动作";
+      el.pv.textContent = "--";
+      el.psub.textContent = "实验记录，不参与预测";
+      el.xv.textContent = "--";
+      el.xsub.textContent = "实验记录，不参与预测";
       el.trainState.textContent = "校准中";
       el.intensityText.textContent = "强度 --";
       el.conf.style.width = "0%";
@@ -505,6 +525,8 @@ button:disabled { opacity: .4; }
       gravity: { x: 0, y: 0, z: 0 },
       linear: [],
       jerk: [],
+      gyro: [],
+      rotation: { alpha: null, beta: null, gamma: null },
       last: null,
       baseline: CONFIG.MOTION.BASELINE_INIT,
       path: "auto", // "linear" | "gravity"，会话内固定
@@ -515,12 +537,21 @@ button:disabled { opacity: .4; }
       stop();
       state.linear.length = 0;
       state.jerk.length = 0;
+      state.gyro.length = 0;
+      state.rotation = { alpha: null, beta: null, gamma: null };
       state.last = null;
       state.gravity = { x: 0, y: 0, z: 0 };
       state.baseline = CONFIG.MOTION.BASELINE_INIT;
       state.path = "auto";
     }
     function onMotion(e) {
+      const r = e.rotationRate;
+      if (r && (r.alpha != null || r.beta != null || r.gamma != null)) {
+        const alpha = Number(r.alpha) || 0, beta = Number(r.beta) || 0, gamma = Number(r.gamma) || 0;
+        state.rotation = { alpha, beta, gamma };
+        state.gyro.push(Math.hypot(alpha, beta, gamma));
+        UI.status("y", "ok", "采集中");
+      }
       if (state.path === "auto") {
         state.path = e.acceleration && e.acceleration.x != null ? "linear" : "gravity";
       }
@@ -551,11 +582,13 @@ button:disabled { opacity: .4; }
       window.addEventListener("devicemotion", onMotion);
       listening = true;
       UI.status("a", "warn", "等待数据");
+      UI.status("y", "warn", "等待 rotationRate");
     }
     function start() {
       try {
         if (typeof DeviceMotionEvent === "undefined") {
           UI.status("a", "", "不支持");
+          UI.status("y", "", "不支持");
           return Promise.resolve(false);
         }
         if (typeof DeviceMotionEvent.requestPermission !== "function") {
@@ -597,7 +630,81 @@ button:disabled { opacity: .4; }
     function takeJerk() {
       return state.jerk.splice(0);
     }
-    return { start, stop, reset, updateBaseline, takeLinear, takeJerk, getState: () => state };
+    function takeGyro() {
+      return state.gyro.splice(0);
+    }
+    return { start, stop, reset, updateBaseline, takeLinear, takeJerk, takeGyro, getState: () => state };
+  })();
+
+  /* ---------------- Environment：气压计 / 磁力计（实验性，能力检测后降级） ---------------- */
+  const Environment = (() => {
+    let pressureSensor = null, magnetSensor = null;
+    const state = {
+      pressure: null, pressureBase: null, pressureDelta: null, pressureActive: false,
+      magX: null, magY: null, magZ: null, magMagnitude: null, magnetActive: false,
+    };
+    function startPressure() {
+      if (!("PressureSensor" in window)) {
+        UI.status("p", "", "浏览器不支持");
+        return false;
+      }
+      try {
+        pressureSensor = new window.PressureSensor({ frequency: CONFIG.ENV.FREQUENCY_HZ });
+        pressureSensor.addEventListener("reading", () => {
+          const value = Number(pressureSensor.pressure);
+          if (!Number.isFinite(value)) return;
+          state.pressure = value;
+          if (state.pressureBase === null) state.pressureBase = value;
+          state.pressureDelta = value - state.pressureBase;
+          state.pressureActive = true;
+          UI.status("p", "ok", "采集中");
+        });
+        pressureSensor.addEventListener("error", () => UI.status("p", "", "不可用/权限受限"));
+        pressureSensor.start();
+        UI.status("p", "warn", "等待数据");
+        return true;
+      } catch (e) {
+        UI.status("p", "", "不可用/权限受限");
+        return false;
+      }
+    }
+    function startMagnet() {
+      if (!("Magnetometer" in window)) {
+        UI.status("x", "", "浏览器不支持");
+        return false;
+      }
+      try {
+        magnetSensor = new window.Magnetometer({ frequency: CONFIG.ENV.FREQUENCY_HZ });
+        magnetSensor.addEventListener("reading", () => {
+          const x = Number(magnetSensor.x), y = Number(magnetSensor.y), z = Number(magnetSensor.z);
+          if (![x, y, z].every(Number.isFinite)) return;
+          state.magX = x; state.magY = y; state.magZ = z;
+          state.magMagnitude = Math.hypot(x, y, z);
+          state.magnetActive = true;
+          UI.status("x", "ok", "采集中");
+        });
+        magnetSensor.addEventListener("error", () => UI.status("x", "", "不可用/权限受限"));
+        magnetSensor.start();
+        UI.status("x", "warn", "等待数据");
+        return true;
+      } catch (e) {
+        UI.status("x", "", "不可用/权限受限");
+        return false;
+      }
+    }
+    function start() { return Promise.resolve([startPressure(), startMagnet()]); }
+    function stop() {
+      try { pressureSensor && pressureSensor.stop(); } catch (e) {}
+      try { magnetSensor && magnetSensor.stop(); } catch (e) {}
+      pressureSensor = magnetSensor = null;
+      state.pressureActive = state.magnetActive = false;
+    }
+    function reset() {
+      stop();
+      state.pressure = state.pressureBase = state.pressureDelta = null;
+      state.magX = state.magY = state.magZ = state.magMagnitude = null;
+    }
+    return { start, stop, reset, snapshot: () => ({ ...state }) };
   })();
 
   /* ---------------- Mic：麦克风特征（只算数值，不录音） ---------------- */
@@ -742,12 +849,13 @@ button:disabled { opacity: .4; }
         historyAccel.length >= cfg.SHOCK_SUSTAIN_WINDOW &&
         Utils.mean(historyAccel.slice(-cfg.SHOCK_SUSTAIN_WINDOW)) >
           Math.max(cfg.SHOCK_SUSTAIN_MIN, baseline * cfg.SHOCK_SUSTAIN_MULT);
-      const shock = af.peak > threshold && sustained && now - lastShock > cfg.SHOCK_COOLDOWN_MS;
+      const userRotation = af.gyroRms > cfg.GYRO_USER_ROTATION_RMS;
+      const shock = af.peak > threshold && sustained && !userRotation && now - lastShock > cfg.SHOCK_COOLDOWN_MS;
       if (shock) {
         lastShock = now;
         count++;
       }
-      return { shock, count, threshold, peak: af.peak };
+      return { shock, count, threshold, peak: af.peak, userRotation };
     }
     return { reset, update, getCount: () => count, getLastTime: () => lastShock };
   })();
@@ -918,11 +1026,14 @@ button:disabled { opacity: .4; }
     "gps_speed_kmh", "gps_speed_smooth_kmh", "gps_accuracy_m", "gps_fresh", "gps_reliable",
     "gps_lat", "gps_lon",
     "accel_rms", "accel_peak", "jerk_rms", "jerk_peak",
+    "gyro_rms", "gyro_peak", "gyro_alpha", "gyro_beta", "gyro_gamma", "shock_motion_rejected",
     "shock", "shock_threshold",
     "mic_active", "mic_valid", "mic_quality", "mic_rms", "mic_centroid_hz", "mic_low", "mic_mid", "mic_high",
     "mic_high_low_ratio", "mic_flux",
     "raw_state", "train_state", "is_moving", "train_intensity", "intensity_raw", "intensity_trend", "state_confidence",
     "mark", "segment_id",
+    "pressure_active", "pressure_hpa", "pressure_delta_hpa",
+    "magnet_active", "magnet_x_ut", "magnet_y_ut", "magnet_z_ut", "magnet_magnitude_ut",
   ];
 
   function exportCsv() {
@@ -975,6 +1086,7 @@ button:disabled { opacity: .4; }
     lastFlushAt = Date.now();
     GPS.reset();
     Motion.reset();
+    Environment.reset();
     Mic.reset();
     Shock.reset();
     Infer.reset();
@@ -1034,14 +1146,20 @@ button:disabled { opacity: .4; }
     // 聚合加速度
     const lin = Motion.takeLinear();
     const jrk = Motion.takeJerk();
+    const gyr = Motion.takeGyro();
+    const rotation = Motion.getState().rotation;
     const af = {
       rms: Utils.rms(lin),
       peak: lin.length ? Math.max(...lin) : 0,
       jerkRms: Utils.rms(jrk),
       jerkPeak: jrk.length ? Math.max(...jrk) : 0,
+      gyroRms: Utils.rms(gyr),
+      gyroPeak: gyr.length ? Math.max(...gyr) : 0,
+      rotation,
     };
     Motion.updateBaseline(af.rms);
     const mf = Mic.features();
+    const env = Environment.snapshot();
     const gs = GPS.snapshot(now);
     const sh = Shock.update(af, now, Infer.getHistory("accel"));
     const inf = Infer.update(mf, af, gs, now, App.start);
@@ -1056,7 +1174,7 @@ button:disabled { opacity: .4; }
 
     if (App.state !== "recording") return;
 
-    samples.push(buildRow(now, af, mf, gs, sh, inf));
+    samples.push(buildRow(now, af, mf, gs, sh, inf, env));
     UI.updateCounts(samples.length);
     if (
       samples.length - draftSavedCount >= CONFIG.DB_FLUSH_BATCH ||
@@ -1074,9 +1192,15 @@ button:disabled { opacity: .4; }
         : "精度 ±" + Math.round(gs.accuracy) + "m · 仅对照";
     UI.el.av.textContent = af.rms.toFixed(3);
     UI.el.asub.textContent = "峰 " + af.peak.toFixed(2) + " · jerk " + af.jerkRms.toFixed(1);
+    UI.el.yv.textContent = af.gyroRms.toFixed(1);
+    UI.el.ysub.textContent = sh.userRotation ? "检测到持机旋转 · 震动事件已抑制" : "峰 " + af.gyroPeak.toFixed(1) + " deg/s";
     UI.el.mv.textContent = Math.round(mf.centroid) || "--";
     UI.el.msub.textContent =
       "RMS " + mf.rms.toFixed(3) + " · " + (mf.valid ? "有效" : "异常") + " · " + mf.quality;
+    UI.el.pv.textContent = env.pressure === null ? "--" : env.pressure.toFixed(2);
+    UI.el.psub.textContent = env.pressureDelta === null ? "浏览器/设备能力检测中" : "相对基线 " + (env.pressureDelta >= 0 ? "+" : "") + env.pressureDelta.toFixed(3) + " hPa";
+    UI.el.xv.textContent = env.magMagnitude === null ? "--" : env.magMagnitude.toFixed(1);
+    UI.el.xsub.textContent = env.magMagnitude === null ? "浏览器/设备能力检测中" : "x " + env.magX.toFixed(1) + " · y " + env.magY.toFixed(1) + " · z " + env.magZ.toFixed(1);
     if (inf.calibrating) {
       UI.el.trainState.textContent = "校准中 " + Math.round(inf.confidence * 100) + "%";
       UI.el.intensityText.textContent = "校准窗口进行中";
@@ -1091,7 +1215,7 @@ button:disabled { opacity: .4; }
     Chart.draw();
   }
 
-  function buildRow(now, af, mf, gs, sh, inf) {
+  function buildRow(now, af, mf, gs, sh, inf, env) {
     return {
       ts: new Date(now).toISOString(),
       elapsed_ms: now - App.start,
@@ -1106,6 +1230,12 @@ button:disabled { opacity: .4; }
       accel_peak: af.peak,
       jerk_rms: af.jerkRms,
       jerk_peak: af.jerkPeak,
+      gyro_rms: af.gyroRms,
+      gyro_peak: af.gyroPeak,
+      gyro_alpha: af.rotation.alpha ?? "",
+      gyro_beta: af.rotation.beta ?? "",
+      gyro_gamma: af.rotation.gamma ?? "",
+      shock_motion_rejected: sh.userRotation ? 1 : 0,
       shock: sh.shock ? 1 : 0,
       shock_threshold: sh.threshold,
       mic_active: mf.active ? 1 : 0,
@@ -1127,6 +1257,14 @@ button:disabled { opacity: .4; }
       state_confidence: inf.confidence,
       mark: currentMark,
       segment_id: segment.id,
+      pressure_active: env.pressureActive ? 1 : 0,
+      pressure_hpa: env.pressure ?? "",
+      pressure_delta_hpa: env.pressureDelta ?? "",
+      magnet_active: env.magnetActive ? 1 : 0,
+      magnet_x_ut: env.magX ?? "",
+      magnet_y_ut: env.magY ?? "",
+      magnet_z_ut: env.magZ ?? "",
+      magnet_magnitude_ut: env.magMagnitude ?? "",
     };
   }
 
@@ -1161,13 +1299,14 @@ button:disabled { opacity: .4; }
     startTimer();
 
     // 传感器并行启动；计时器不受任何授权弹窗阻塞
-    const starts = [Promise.resolve(GPS.start()), Motion.start(), Mic.start()];
+    const starts = [Promise.resolve(GPS.start()), Motion.start(), Mic.start(), Environment.start()];
     Promise.allSettled(starts).then(() => {
       if (sid !== App.sessionId) {
         // 启动期间被停止：把此时才陆续就绪的传感器全部关掉
         GPS.stop();
         Motion.stop();
         Mic.stop();
+        Environment.stop();
       } else {
         finishStart(sid);
       }
@@ -1189,6 +1328,7 @@ button:disabled { opacity: .4; }
     GPS.stop();
     Motion.stop();
     Mic.stop();
+    Environment.stop();
     releaseWakeLock();
     App.state = "idle";
     flushDraft();
