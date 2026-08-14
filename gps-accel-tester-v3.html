@@ -88,14 +88,14 @@ button:disabled { opacity: .4; }
   </section>
 
   <section class="metrics">
-    <div class="box card gps"><div class="name">GPS 速度（中值平滑）</div><div id="gv" class="value">--</div><div class="unit">km/h</div><div id="gsub" class="detail">精度 --</div></div>
+    <div class="box card gps"><div class="name">GPS 对照（不参与预测）</div><div id="gv" class="value">--</div><div class="unit">km/h</div><div id="gsub" class="detail">仅记录原始数据</div></div>
     <div class="box card acc"><div class="name">振动强度</div><div id="av" class="value">--</div><div class="unit">linear RMS m/s²</div><div id="asub" class="detail">峰值 -- · jerk --</div></div>
     <div class="box card mic"><div class="name">声音特征</div><div id="mv" class="value">--</div><div class="unit">spectral centroid Hz</div><div id="msub" class="detail">RMS -- · 高频比 --</div></div>
   </section>
 
   <section class="box state">
     <div>
-      <div class="name">推测列车状态</div>
+      <div class="name">运行状态</div>
       <strong id="trainState">校准中</strong>
       <div class="confidence"><i id="conf"></i></div>
       <div id="intensityText" class="detail">强度 --</div>
@@ -113,14 +113,10 @@ button:disabled { opacity: .4; }
   </section>
 
   <section class="box">
-    <div class="name">真实状态（分段标注：点击按钮开始一段标注，切换按钮会关闭上一段并开启新段）</div>
+    <div class="name">真实状态（点击后持续记录，切换按钮会结束上一段）</div>
     <div id="labels" class="buttons" style="margin-top:9px">
-      <button class="label-btn secondary" data-label="步行">步行</button>
       <button class="label-btn secondary" data-label="停站">停站</button>
-      <button class="label-btn secondary" data-label="起步">起步</button>
-      <button class="label-btn secondary" data-label="巡航">巡航</button>
-      <button class="label-btn secondary" data-label="高速">高速</button>
-      <button class="label-btn secondary" data-label="制动">制动</button>
+      <button class="label-btn secondary" data-label="运行">运行</button>
       <button class="label-btn secondary" data-label="清除">清除</button>
     </div>
     <div class="hint">当前标签：<b id="currentLabel">未标注</b> · 段 <b id="segmentId">0</b></div>
@@ -197,22 +193,22 @@ button:disabled { opacity: .4; }
       BAND_LOW_HZ: 250,
       BAND_MID_HZ: 2000,
       BAND_HIGH_HZ: 8000,
+      INVALID_HOLD_TICKS: 40,     // 连续约10秒异常才判无效
+      RECOVER_HOLD_TICKS: 12,     // 连续约3秒正常即可恢复
+      SILENT_RMS: 0.012,
+      COLLAPSE_CENTROID_HZ: 300,
+      COLLAPSE_RATIO: 0.05,
     },
     INFER: {
-      WEIGHT_SOUND: 0.55,          // 环境音量权重
-      WEIGHT_BRIGHT: 0.20,         // 频谱质心（"音色"）权重
-      WEIGHT_VIBRATION: 0.25,      // 振动权重
-      GPS_BLEND: 0.25,             // GPS 可靠时强度中 GPS 的占比
-      GPS_SPEED_FULL_KMH: 80,      // 该速度对应 GPS 归一化=1
+      WEIGHT_SOUND: 0.72,          // 声音是停站/运行的主信号
+      WEIGHT_VIBRATION: 0.28,      // 振动只作辅助
       INTENSITY_SMOOTH_ALPHA: 0.4, // 强度 EMA：new = a*raw + (1-a)*old
-      WALKING_VIB_MIN: 0.68,
-      WALKING_SOUND_MAX: 0.35,
-      THRESHOLD_STOP: 0.25,        // 以下阈值由 analyze_v3.py 在标注数据上拟合
-      THRESHOLD_DEPART: 0.43,
-      THRESHOLD_CRUISE: 0.72,
+      TREND_SMOOTH_ALPHA: 0.15,
+      THRESHOLD_MOVING: 0.43,
+      ABS_STOP_RMS: 0.045,          // 两批实测的停站保护阈值
+      ABS_STOP_ACCEL: 0.30,
       HOLD_STOP_MS: 5000,          // 停站需要持续多久才切换（防抖）
-      HOLD_FAST_MS: 3000,          // 高速需要持续多久才切换
-      HOLD_DEFAULT_MS: 2500,
+      HOLD_MOVING_MS: 3000,
       CONFIDENCE_BASE: 0.55,
       CONFIDENCE_PER_SAMPLE: 1 / 480,
       CONFIDENCE_GPS_BONUS: 0.15,
@@ -614,9 +610,17 @@ button:disabled { opacity: .4; }
     let prevFreq = null;
     let sampleRate = 44100;
     let active = false;
+    let valid = true;
+    let quality = "waiting";
+    let invalidTicks = 0;
+    let recoverTicks = 0;
 
     function reset() {
       stop();
+      valid = true;
+      quality = "waiting";
+      invalidTicks = 0;
+      recoverTicks = 0;
     }
     function start() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -641,6 +645,10 @@ button:disabled { opacity: .4; }
           freqData = new Uint8Array(an.frequencyBinCount);
           ctx.createMediaStreamSource(stream).connect(an); // 不接 destination，避免反馈
           active = true;
+          valid = true;
+          quality = "checking";
+          invalidTicks = 0;
+          recoverTicks = 0;
           prevFreq = null;
           UI.status("m", "ok", "采集中");
           return true;
@@ -662,9 +670,10 @@ button:disabled { opacity: .4; }
       an = null;
       prevFreq = null;
       active = false;
+      quality = "inactive";
     }
     function features() {
-      if (!an) return { rms: 0, centroid: 0, low: 0, mid: 0, high: 0, ratio: 0, flux: 0, active: false };
+      if (!an) return { rms: 0, centroid: 0, low: 0, mid: 0, high: 0, ratio: 0, flux: 0, active: false, valid: false, quality: "inactive" };
       an.getByteTimeDomainData(timeData);
       an.getByteFrequencyData(freqData);
       let ss = 0;
@@ -689,6 +698,28 @@ button:disabled { opacity: .4; }
       out.ratio = out.high / (out.low + 1);
       out.flux = flux / freqData.length;
       prevFreq = new Uint8Array(freqData);
+      const c = CONFIG.MIC;
+      const silent = out.rms < c.SILENT_RMS;
+      const collapsed = out.centroid < c.COLLAPSE_CENTROID_HZ && out.ratio < c.COLLAPSE_RATIO;
+      if (silent || collapsed) {
+        invalidTicks++;
+        recoverTicks = 0;
+        if (invalidTicks >= c.INVALID_HOLD_TICKS) {
+          valid = false;
+          quality = silent ? "silent" : "spectral_collapse";
+          UI.status("m", "warn", "输入异常/可能为耳机麦克风");
+        }
+      } else {
+        recoverTicks++;
+        invalidTicks = 0;
+        if (recoverTicks >= c.RECOVER_HOLD_TICKS) {
+          valid = true;
+          quality = "valid";
+          UI.status("m", "ok", "采集中");
+        }
+      }
+      out.valid = valid;
+      out.quality = quality;
       return out;
     }
     return { start, stop, reset, features, isActive: () => active };
@@ -729,6 +760,8 @@ button:disabled { opacity: .4; }
     let candidateState = "";
     let candidateSince = 0;
     let smoothed = null;
+    let previousSmoothed = null;
+    let trend = 0;
 
     function reset() {
       for (const k in history) history[k].length = 0;
@@ -736,6 +769,8 @@ button:disabled { opacity: .4; }
       candidateState = "";
       candidateSince = 0;
       smoothed = null;
+      previousSmoothed = null;
+      trend = 0;
     }
     function pushHistory(k, v) {
       history[k].push(v);
@@ -746,8 +781,8 @@ button:disabled { opacity: .4; }
     }
     function update(mf, af, gs, now, start) {
       const c = cfg();
-      // 麦克风未就绪时只推 accel 历史，避免 0 值污染音量分位数
-      if (mf.active) {
+      // 只有质量有效的麦克风数据才能更新声音基线，耳机底噪不会污染分位数
+      if (mf.active && mf.valid) {
         pushHistory("rms", mf.rms);
         pushHistory("centroid", mf.centroid);
         pushHistory("ratio", mf.ratio);
@@ -774,47 +809,54 @@ button:disabled { opacity: .4; }
 
       const q = (k, p) => Utils.percentile(history[k], p);
       const norm = (v, lo, hi) => Utils.clamp((v - lo) / Math.max(hi - lo, 1e-4), 0, 1);
-      const sound = mf.active ? norm(mf.rms, q("rms", 0.2), q("rms", 0.8)) : 0.5;
-      const bright = mf.active ? norm(mf.centroid, q("centroid", 0.2), q("centroid", 0.8)) : 0.5;
+      if (!mf.active || !mf.valid || history.rms.length < 40) {
+        if (mf.active && !mf.valid) {
+          history.rms.length = 0;
+          history.centroid.length = 0;
+          history.ratio.length = 0;
+        }
+        return {
+          state: "麦克风异常",
+          raw: "麦克风异常",
+          intensity: smoothed ?? 0,
+          rawIntensity: 0,
+          trend: 0,
+          isMoving: null,
+          confidence: 0,
+          calibrating: false,
+        };
+      }
+      const sound = norm(mf.rms, q("rms", 0.2), q("rms", 0.8));
       const vibration = norm(af.rms, q("accel", 0.2), q("accel", 0.8));
 
       let rawIntensity =
-        c.WEIGHT_SOUND * sound + c.WEIGHT_BRIGHT * bright + c.WEIGHT_VIBRATION * vibration;
-      if (gs.reliable && gs.speed !== null) {
-        rawIntensity =
-          (1 - c.GPS_BLEND) * rawIntensity + c.GPS_BLEND * Utils.clamp(gs.speed / c.GPS_SPEED_FULL_KMH, 0, 1);
-      }
+        c.WEIGHT_SOUND * sound + c.WEIGHT_VIBRATION * vibration;
       smoothed =
         smoothed === null
           ? rawIntensity
           : c.INTENSITY_SMOOTH_ALPHA * rawIntensity + (1 - c.INTENSITY_SMOOTH_ALPHA) * smoothed;
       const intensity = smoothed;
+      const delta = previousSmoothed === null ? 0 : intensity - previousSmoothed;
+      trend = c.TREND_SMOOTH_ALPHA * delta + (1 - c.TREND_SMOOTH_ALPHA) * trend;
+      previousSmoothed = intensity;
 
-      const walking = vibration > c.WALKING_VIB_MIN && sound < c.WALKING_SOUND_MAX;
-      let raw = walking
-        ? "步行"
-        : intensity < c.THRESHOLD_STOP
-          ? "停站"
-          : intensity < c.THRESHOLD_DEPART
-            ? "起步/低速"
-            : intensity < c.THRESHOLD_CRUISE
-              ? "巡航"
-              : "高速";
+      const absoluteStop = mf.rms < c.ABS_STOP_RMS && af.rms < c.ABS_STOP_ACCEL;
+      const isMoving = !absoluteStop && intensity >= c.THRESHOLD_MOVING;
+      const raw = isMoving ? "运行" : "停站";
 
       if (raw !== candidateState) {
         candidateState = raw;
         candidateSince = now;
       }
-      const hold =
-        raw === "停站" ? c.HOLD_STOP_MS : raw === "高速" ? c.HOLD_FAST_MS : c.HOLD_DEFAULT_MS;
+      const hold = raw === "停站" ? c.HOLD_STOP_MS : c.HOLD_MOVING_MS;
       if (now - candidateSince >= hold) stableState = raw;
 
       const confidence = Utils.clamp(
-        c.CONFIDENCE_BASE + history.accel.length * c.CONFIDENCE_PER_SAMPLE + (gs.reliable ? c.CONFIDENCE_GPS_BONUS : 0),
+        c.CONFIDENCE_BASE + history.accel.length * c.CONFIDENCE_PER_SAMPLE,
         0,
         1
       );
-      return { state: stableState, raw, intensity, rawIntensity, confidence, calibrating: false };
+      return { state: stableState, raw, intensity, rawIntensity, trend, isMoving, confidence, calibrating: false };
     }
     return { reset, update, getHistory };
   })();
@@ -877,9 +919,9 @@ button:disabled { opacity: .4; }
     "gps_lat", "gps_lon",
     "accel_rms", "accel_peak", "jerk_rms", "jerk_peak",
     "shock", "shock_threshold",
-    "mic_active", "mic_rms", "mic_centroid_hz", "mic_low", "mic_mid", "mic_high",
+    "mic_active", "mic_valid", "mic_quality", "mic_rms", "mic_centroid_hz", "mic_low", "mic_mid", "mic_high",
     "mic_high_low_ratio", "mic_flux",
-    "raw_state", "train_state", "train_intensity", "intensity_raw", "state_confidence",
+    "raw_state", "train_state", "is_moving", "train_intensity", "intensity_raw", "intensity_trend", "state_confidence",
     "mark", "segment_id",
   ];
 
@@ -1029,19 +1071,19 @@ button:disabled { opacity: .4; }
     UI.el.gsub.textContent =
       gs.accuracy === null
         ? "精度 --"
-        : "精度 ±" + Math.round(gs.accuracy) + "m · " + (gs.reliable ? "采用" : "降权");
+        : "精度 ±" + Math.round(gs.accuracy) + "m · 仅对照";
     UI.el.av.textContent = af.rms.toFixed(3);
     UI.el.asub.textContent = "峰 " + af.peak.toFixed(2) + " · jerk " + af.jerkRms.toFixed(1);
     UI.el.mv.textContent = Math.round(mf.centroid) || "--";
     UI.el.msub.textContent =
-      "RMS " + mf.rms.toFixed(3) + " · 高频比 " + mf.ratio.toFixed(2) + " · flux " + mf.flux.toFixed(1);
+      "RMS " + mf.rms.toFixed(3) + " · " + (mf.valid ? "有效" : "异常") + " · " + mf.quality;
     if (inf.calibrating) {
       UI.el.trainState.textContent = "校准中 " + Math.round(inf.confidence * 100) + "%";
       UI.el.intensityText.textContent = "校准窗口进行中";
     } else {
       UI.el.trainState.textContent = inf.state;
       UI.el.intensityText.textContent =
-        "强度 " + Math.round(inf.intensity * 100) + "% · 即时 " + inf.raw;
+        "强度 " + Math.round(inf.intensity * 100) + "% · 趋势 " + ((inf.trend || 0) * 1000).toFixed(1);
     }
     UI.el.conf.style.width = (inf.confidence * 100) + "%";
 
@@ -1067,6 +1109,8 @@ button:disabled { opacity: .4; }
       shock: sh.shock ? 1 : 0,
       shock_threshold: sh.threshold,
       mic_active: mf.active ? 1 : 0,
+      mic_valid: mf.valid ? 1 : 0,
+      mic_quality: mf.quality,
       mic_rms: mf.rms,
       mic_centroid_hz: mf.centroid,
       mic_low: mf.low,
@@ -1076,8 +1120,10 @@ button:disabled { opacity: .4; }
       mic_flux: mf.flux,
       raw_state: inf.raw,
       train_state: inf.state,
+      is_moving: inf.isMoving === null || inf.isMoving === undefined ? "" : inf.isMoving ? 1 : 0,
       train_intensity: inf.intensity,
       intensity_raw: inf.rawIntensity,
+      intensity_trend: inf.trend || 0,
       state_confidence: inf.confidence,
       mark: currentMark,
       segment_id: segment.id,
