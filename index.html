@@ -121,10 +121,10 @@
 <body>
 <div class="container">
   <h1>MetroBooming · 地铁环境传感器测试</h1>
-  <div class="subtitle">地铁乘坐体验（震动 / 声音 / GPS 速度）数据采集与状态推理工具集</div>
+  <div class="subtitle">地铁乘坐体验（声音 / 震动 / 旋转 / 气压 / 磁场）数据采集与运行强度推理工具集</div>
 
   <div class="note">
-    传感器（GPS / 运动 / 麦克风）需要安全上下文。当前通过 HTTPS 访问，<b>所有工具可用</b>。
+    传感器需要安全上下文。当前通过 HTTPS 访问；具体能力仍取决于手机与浏览器，<b>不支持的传感器会自动降级</b>，不会阻塞其他数据。
   </div>
 
   <a class="card recommended" href="gps-accel-tester-v3.html">
@@ -133,13 +133,17 @@
       <span class="badge v3">推荐</span>
     </div>
     <div class="desc">
-      正式采集版：GPS（中值平滑）+ 运动 + 麦克风特征，实时推断列车状态（静止/巡航/加减速/靠站），
-      人工标注写入 CSV，IndexedDB 断点自动保存，崩溃后可恢复，导出供 analyze_v3.py 调参。
+      正式采集版：以麦克风和加速度判断停站/运行，并输出连续运行强度与趋势；GPS仅作原始对照，不参与预测。
+      新增耳机麦克风异常检测、陀螺仪持机动作过滤，以及实验性的气压计和磁力计记录。人工分段标注写入 CSV，
+      IndexedDB 自动保存草稿，页面意外关闭后可恢复。
     </div>
     <div class="specs">
-      <span class="chip gps">GPS 中值平滑</span>
-      <span class="chip acc">运动/震动</span>
-      <span class="chip mic">麦克风特征</span>
+      <span class="chip mic">停站/运行 + 强度</span>
+      <span class="chip mic">麦克风质量检测</span>
+      <span class="chip acc">加速度/震动</span>
+      <span class="chip acc">陀螺仪过滤</span>
+      <span class="chip new">气压/磁场实验</span>
+      <span class="chip gps">GPS 仅对照</span>
       <span class="chip new">段标注</span>
       <span class="chip new">草稿断点续存</span>
       <span class="chip new">校准进度</span>
@@ -199,7 +203,7 @@
   </a>
 
   <footer>
-    GPS 速度 · 振动强度 · 声音特征 → CSV 导出 → analyze_v3.py 自动标定阈值<br />
+    声音质量 · 停站/运行 · 连续强度 · 震动/旋转 · 气压/磁场 → CSV 导出与离线分析<br />
     数据仅保存在本地浏览器（IndexedDB 草稿）与你的导出文件，不上传任何服务器。
   </footer>
 </div>
