@@ -215,11 +215,14 @@ button:disabled { opacity: .4; }
       WEIGHT_VIBRATION: 0.28,      // 振动只作辅助
       INTENSITY_SMOOTH_ALPHA: 0.4, // 强度 EMA：new = a*raw + (1-a)*old
       TREND_SMOOTH_ALPHA: 0.15,
-      THRESHOLD_MOVING: 0.43,
-      ABS_STOP_RMS: 0.045,          // 两批实测的停站保护阈值
-      ABS_STOP_ACCEL: 0.30,
-      HOLD_STOP_MS: 5000,          // 停站需要持续多久才切换（防抖）
-      HOLD_MOVING_MS: 3000,
+      ENTER_STOP_INTENSITY: 0.30,  // 运行中只有强度足够低才允许进入停站
+      EXIT_STOP_INTENSITY: 0.43,   // 停站后使用更高阈值确认重新运行（迟滞）
+      STOP_MIC_RMS: 0.055,         // 进入停站时，声音和振动必须同时较低
+      STOP_ACCEL_RMS: 0.35,
+      MOVING_GUARD_MIC_RMS: 0.060, // 任一绝对信号仍明显时，禁止误入停站
+      MOVING_GUARD_ACCEL_RMS: 0.40,
+      HOLD_STOP_MS: 8000,          // 停站需长确认，避免平稳巡航被误判
+      HOLD_MOVING_MS: 2500,        // 起步确认保持灵敏
       CONFIDENCE_BASE: 0.55,
       CONFIDENCE_PER_SAMPLE: 1 / 480,
       CONFIDENCE_GPS_BONUS: 0.15,
@@ -889,13 +892,15 @@ button:disabled { opacity: .4; }
     }
     function update(mf, af, gs, now, start) {
       const c = cfg();
+      const phoneMotionRejected = af.gyroRms > CONFIG.MOTION.GYRO_USER_ROTATION_RMS;
       // 只有质量有效的麦克风数据才能更新声音基线，耳机底噪不会污染分位数
       if (mf.active && mf.valid) {
         pushHistory("rms", mf.rms);
         pushHistory("centroid", mf.centroid);
         pushHistory("ratio", mf.ratio);
       }
-      pushHistory("accel", af.rms);
+      // 明显持机旋转时不更新列车振动基线，避免手部动作污染加速度分位数。
+      if (!phoneMotionRejected) pushHistory("accel", af.rms);
 
       const ready =
         now - start >= CONFIG.CALIBRATION_MS && history.accel.length >= 40;
@@ -935,7 +940,8 @@ button:disabled { opacity: .4; }
         };
       }
       const sound = norm(mf.rms, q("rms", 0.2), q("rms", 0.8));
-      const vibration = norm(af.rms, q("accel", 0.2), q("accel", 0.8));
+      const accelForInference = phoneMotionRejected ? q("accel", 0.5) : af.rms;
+      const vibration = norm(accelForInference, q("accel", 0.2), q("accel", 0.8));
 
       let rawIntensity =
         c.WEIGHT_SOUND * sound + c.WEIGHT_VIBRATION * vibration;
@@ -948,9 +954,35 @@ button:disabled { opacity: .4; }
       trend = c.TREND_SMOOTH_ALPHA * delta + (1 - c.TREND_SMOOTH_ALPHA) * trend;
       previousSmoothed = intensity;
 
-      const absoluteStop = mf.rms < c.ABS_STOP_RMS && af.rms < c.ABS_STOP_ACCEL;
-      const isMoving = !absoluteStop && intensity >= c.THRESHOLD_MOVING;
-      const raw = isMoving ? "运行" : "停站";
+      // 非对称迟滞：运行 -> 停站采用严格低阈值和绝对信号门限；
+      // 停站 -> 运行采用较高阈值，且麦克风/加速度任一明显即可快速唤醒。
+      const movingGuard =
+        mf.rms > c.MOVING_GUARD_MIC_RMS || accelForInference > c.MOVING_GUARD_ACCEL_RMS;
+      const stopSignalsLow =
+        mf.rms < c.STOP_MIC_RMS && accelForInference < c.STOP_ACCEL_RMS;
+      const stopCandidate =
+        !movingGuard && stopSignalsLow && intensity < c.ENTER_STOP_INTENSITY;
+      const movingCandidate =
+        movingGuard || intensity >= c.EXIT_STOP_INTENSITY;
+
+      let raw;
+      let decisionReason;
+      if (stableState === "停站") {
+        raw = movingCandidate ? "运行" : "停站";
+        decisionReason = movingGuard
+          ? "absolute-moving-guard"
+          : movingCandidate
+            ? "exit-stop-intensity"
+            : "hold-stop";
+      } else {
+        raw = stopCandidate ? "停站" : "运行";
+        decisionReason = movingGuard
+          ? "absolute-moving-guard"
+          : stopCandidate
+            ? "enter-stop-confirmed"
+            : "hold-moving";
+      }
+      const isMoving = raw === "运行";
 
       if (raw !== candidateState) {
         candidateState = raw;
@@ -964,7 +996,20 @@ button:disabled { opacity: .4; }
         0,
         1
       );
-      return { state: stableState, raw, intensity, rawIntensity, trend, isMoving, confidence, calibrating: false };
+      return {
+        state: stableState,
+        raw,
+        intensity,
+        rawIntensity,
+        trend,
+        isMoving,
+        confidence,
+        calibrating: false,
+        movingGuard,
+        stopSignalsLow,
+        phoneMotionRejected,
+        decisionReason,
+      };
     }
     return { reset, update, getHistory };
   })();
@@ -1031,6 +1076,7 @@ button:disabled { opacity: .4; }
     "mic_active", "mic_valid", "mic_quality", "mic_rms", "mic_centroid_hz", "mic_low", "mic_mid", "mic_high",
     "mic_high_low_ratio", "mic_flux",
     "raw_state", "train_state", "is_moving", "train_intensity", "intensity_raw", "intensity_trend", "state_confidence",
+    "moving_guard", "stop_signals_low", "phone_motion_rejected", "decision_reason",
     "mark", "segment_id",
     "pressure_active", "pressure_hpa", "pressure_delta_hpa",
     "magnet_active", "magnet_x_ut", "magnet_y_ut", "magnet_z_ut", "magnet_magnitude_ut",
@@ -1255,6 +1301,10 @@ button:disabled { opacity: .4; }
       intensity_raw: inf.rawIntensity,
       intensity_trend: inf.trend || 0,
       state_confidence: inf.confidence,
+      moving_guard: inf.movingGuard === undefined ? "" : inf.movingGuard ? 1 : 0,
+      stop_signals_low: inf.stopSignalsLow === undefined ? "" : inf.stopSignalsLow ? 1 : 0,
+      phone_motion_rejected: inf.phoneMotionRejected === undefined ? "" : inf.phoneMotionRejected ? 1 : 0,
+      decision_reason: inf.decisionReason || "",
       mark: currentMark,
       segment_id: segment.id,
       pressure_active: env.pressureActive ? 1 : 0,
